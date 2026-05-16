@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% block title %}Session Detail — Claude Monitor{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <a href="/sessions" style="color:var(--muted);font-size:13px">← All Sessions</a>
+  <h1 style="margin-top:8px">Session: <span id="sid" style="color:var(--accent)"></span></h1>
+  <p id="session-meta" style="color:var(--muted)"></p>
+</div>
+
+<!-- Session stat cards -->
+<div class="cards" id="session-cards" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
+  <div class="card"><div class="card-label">Messages</div><div class="card-value" id="c-msgs">—</div></div>
+  <div class="card"><div class="card-label">Total Input</div><div class="card-value" id="c-in">—</div></div>
+  <div class="card"><div class="card-label">Total Output</div><div class="card-value" id="c-out">—</div></div>
+  <div class="card"><div class="card-label">Cache Read</div><div class="card-value" id="c-cr" style="color:var(--green)">—</div></div>
+  <div class="card"><div class="card-label">Est. Cost</div><div class="card-value" id="c-cost" style="color:var(--yellow)">—</div></div>
+</div>
+
+<div class="panel">
+  <div class="panel-title">Messages & Token Breakdown</div>
+  <div id="messages-list"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const sessionId = "{{ session_id }}";
+  document.getElementById('sid').textContent = sessionId.slice(0,8) + '…';
+
+  async function loadSession() {
+    const r = await fetch(`/api/sessions/${sessionId}`);
+    if (!r.ok) {
+      document.getElementById('messages-list').innerHTML = '<div class="empty-state"><h3>Session not found</h3></div>';
+      return;
+    }
+    const msgs = await r.json();
+    if (!msgs.length) {
+      document.getElementById('messages-list').innerHTML = '<div class="empty-state"><h3>No messages</h3></div>';
+      return;
+    }
+
+    // Compute session stats
+    const totIn  = msgs.reduce((a,m) => a + (m.input_tokens||0), 0);
+    const totOut = msgs.reduce((a,m) => a + (m.output_tokens||0), 0);
+    const totCR  = msgs.reduce((a,m) => a + (m.cache_read_tokens||0), 0);
+    const totCost= msgs.reduce((a,m) => a + (m.estimated_cost_usd||0), 0);
+    document.getElementById('c-msgs').textContent = msgs.length;
+    document.getElementById('c-in').textContent   = fmt(totIn);
+    document.getElementById('c-out').textContent  = fmt(totOut);
+    document.getElementById('c-cr').textContent   = fmt(totCR);
+    document.getElementById('c-cost').textContent = fmtCost(totCost);
+    document.getElementById('session-meta').textContent =
+      `${msgs[0]?.model || ''} · ${msgs[0]?.timestamp?.slice(0,10) || ''}`;
+
+    const maxTok = Math.max(...msgs.map(m => m.total_tokens || 0), 1);
+
+    document.getElementById('messages-list').innerHTML = msgs.map((m, i) => `
+      <div style="border-bottom:1px solid var(--border);padding:16px 0" id="msg-${m.id}">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+          <span style="color:var(--muted);font-size:12px">#${i+1}</span>
+          ${modelBadge(m.model)}
+          <span style="font-size:12px;color:var(--muted)">${m.timestamp?.replace('T',' ').slice(0,19) || ''}</span>
+          <span style="margin-left:auto;font-size:12px;color:var(--yellow)">${fmtCost(m.estimated_cost_usd)}</span>
+        </div>
+
+        <!-- Token row -->
+        <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;font-size:12px">
+          <span>📥 Input: <strong>${fmt(m.input_tokens)}</strong></span>
+          <span>📤 Output: <strong>${fmt(m.output_tokens)}</strong></span>
+          <span style="color:var(--green)">💾 Cache Read: <strong>${fmt(m.cache_read_tokens)}</strong></span>
+          <span style="color:var(--muted)">Total: <strong>${fmt(m.total_tokens)}</strong></span>
+        </div>
+
+        <!-- Token bar -->
+        <div class="token-bar" style="margin-bottom:10px">
+          <div class="token-bar-fill" style="width:${Math.round((m.total_tokens/maxTok)*100)}%;
+            background: ${m.total_tokens > maxTok*0.7 ? 'var(--red)' : m.total_tokens > maxTok*0.4 ? 'var(--yellow)' : 'var(--accent)'}">
+          </div>
+        </div>
+
+        <!-- Prompt -->
+        ${m.prompt_text ? `
+          <div style="font-size:12px;color:var(--muted);margin-bottom:4px">Prompt:</div>
+          <div class="prompt-box">${escHtml(m.prompt_text)}</div>
+        ` : ''}
+
+        <!-- Existing suggestion -->
+        ${m.suggestion ? `
+          <div class="suggestion" style="margin-top:10px">
+            <div class="suggestion-type">${m.suggestion_type || 'suggestion'}</div>
+            <div>${escHtml(m.suggestion)}</div>
+            ${m.estimated_savings ? `<div class="suggestion-savings">~${fmt(m.estimated_savings)} tokens saveable</div>` : ''}
+          </div>
+        ` : ''}
+
+        <!-- Optimize button -->
+        ${m.input_tokens > 0 ? `
+          <div style="margin-top:10px;display:flex;gap:8px">
+            <button class="btn btn-ghost" onclick="optimizeMsg(${m.id}, false)" id="opt-btn-${m.id}">
+              🔍 Quick Analysis
+            </button>
+            <button class="btn btn-primary" onclick="optimizeMsg(${m.id}, true)" id="ai-btn-${m.id}">
+              🤖 AI Analysis
+            </button>
+          </div>
+          <div id="opt-result-${m.id}"></div>
+        ` : ''}
+      </div>
+    `).join('');
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  async function optimizeMsg(msgId, useAi) {
+    const btn = document.getElementById(`opt-btn-${msgId}`);
+    const aiBtn = document.getElementById(`ai-btn-${msgId}`);
+    const result = document.getElementById(`opt-result-${msgId}`);
+    if (btn) btn.disabled = true;
+    if (aiBtn) aiBtn.disabled = true;
+    result.innerHTML = '<div style="margin-top:8px;color:var(--muted);font-size:13px"><div class="spinner"></div> Analyzing…</div>';
+
+    try {
+      const r = await fetch('/api/optimize', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({message_id: msgId, use_ai: useAi})
+      });
+      const data = await r.json();
+      const suggestions = data.suggestions || [];
+
+      if (!suggestions.length) {
+        result.innerHTML = '<div style="margin-top:8px;color:var(--green);font-size:13px">✓ This prompt looks well-optimized!</div>';
+      } else {
+        result.innerHTML = suggestions.map(s => `
+          <div class="suggestion" style="margin-top:8px">
+            <div class="suggestion-type">${s.type}</div>
+            <div>${escHtml(s.suggestion)}</div>
+            ${s.estimated_savings ? `<div class="suggestion-savings">Estimated savings: ~${fmt(s.estimated_savings)} tokens</div>` : ''}
+          </div>
+        `).join('');
+      }
+    } catch (e) {
+      result.innerHTML = `<div style="margin-top:8px;color:var(--red);font-size:13px">Error: ${e.message}</div>`;
+    } finally {
+      if (btn) btn.disabled = false;
+      if (aiBtn) aiBtn.disabled = false;
+    }
+  }
+
+  loadSession();
+</script>
+{% endblock %}

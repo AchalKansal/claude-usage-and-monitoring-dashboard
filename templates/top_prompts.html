@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block title %}Top Token Prompts — Claude Monitor{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Top Token Prompts</h1>
+  <p>The prompts that consumed the most tokens — best candidates for optimization.</p>
+</div>
+
+<div class="panel">
+  <div id="prompts-list">
+    <div style="text-align:center;padding:40px;color:var(--muted)">
+      <div class="spinner"></div> Loading…
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  async function loadTopPrompts() {
+    const r = await fetch('/api/top-prompts?limit=30');
+    const msgs = await r.json();
+
+    if (!msgs.length) {
+      document.getElementById('prompts-list').innerHTML =
+        '<div class="empty-state"><h3>No data yet</h3><p>Click Rescan to import sessions.</p></div>';
+      return;
+    }
+
+    const maxTok = Math.max(...msgs.map(m => m.total_tokens || 0), 1);
+
+    document.getElementById('prompts-list').innerHTML = msgs.map((m, i) => `
+      <div style="border-bottom:1px solid var(--border);padding:18px 0" id="top-${m.id}">
+        <div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:10px">
+          <span style="font-size:18px;font-weight:700;color:var(--muted);min-width:28px">#${i+1}</span>
+          <div style="flex:1">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+              ${modelBadge(m.model)}
+              <span style="font-size:12px;color:var(--muted)">${m.project || '—'}</span>
+              <span style="font-size:12px;color:var(--muted)">${m.timestamp?.slice(0,10) || ''}</span>
+              <a href="/sessions/${m.session_id}" style="font-size:12px">View Session</a>
+            </div>
+
+            <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px;margin-bottom:10px">
+              <span>📥 Input: <strong style="color:var(--text)">${fmt(m.input_tokens)}</strong></span>
+              <span>📤 Output: <strong style="color:var(--text)">${fmt(m.output_tokens)}</strong></span>
+              <span style="color:var(--green)">💾 Cache: <strong>${fmt(m.cache_read_tokens)}</strong></span>
+              <span style="color:var(--accent)">Total: <strong>${fmt(m.total_tokens)}</strong></span>
+              <span style="color:var(--yellow)">${fmtCost(m.estimated_cost_usd)}</span>
+            </div>
+
+            <!-- Token progress bar -->
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+              <div class="token-bar" style="flex:1">
+                <div class="token-bar-fill" style="width:${Math.round((m.total_tokens/maxTok)*100)}%;
+                  height:8px;
+                  background: ${m.total_tokens > maxTok*0.7 ? 'var(--red)' : m.total_tokens > maxTok*0.4 ? 'var(--yellow)' : 'var(--accent)'}">
+                </div>
+              </div>
+              <span style="color:var(--muted);font-size:11px;white-space:nowrap">
+                ${Math.round((m.total_tokens/maxTok)*100)}% of max
+              </span>
+            </div>
+
+            ${m.prompt_text ? `
+              <div style="font-size:12px;color:var(--muted);margin-bottom:4px">Prompt preview:</div>
+              <div class="prompt-box">${escHtml(m.prompt_text.slice(0, 500))}${m.prompt_text.length > 500 ? '…' : ''}</div>
+            ` : ''}
+
+            ${m.suggestion ? `
+              <div class="suggestion" style="margin-top:10px">
+                <div class="suggestion-type">${m.suggestion_type || 'suggestion'}</div>
+                <div>${escHtml(m.suggestion)}</div>
+                ${m.estimated_savings ? `<div class="suggestion-savings">~${fmt(m.estimated_savings)} tokens saveable</div>` : ''}
+              </div>
+            ` : `
+              <div style="margin-top:10px;display:flex;gap:8px">
+                <button class="btn btn-ghost" onclick="optimizeMsg(${m.id}, false)" id="opt-btn-${m.id}">
+                  🔍 Quick Analysis
+                </button>
+                <button class="btn btn-primary" onclick="optimizeMsg(${m.id}, true)" id="ai-btn-${m.id}">
+                  🤖 AI Analysis
+                </button>
+              </div>
+              <div id="opt-result-${m.id}"></div>
+            `}
+          </div>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  function escHtml(s) {
+    return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  async function optimizeMsg(msgId, useAi) {
+    const btn = document.getElementById(`opt-btn-${msgId}`);
+    const aiBtn = document.getElementById(`ai-btn-${msgId}`);
+    const result = document.getElementById(`opt-result-${msgId}`);
+    if (btn) btn.disabled = true;
+    if (aiBtn) aiBtn.disabled = true;
+    result.innerHTML = '<div style="margin-top:8px;color:var(--muted);font-size:13px"><div class="spinner"></div> Analyzing…</div>';
+
+    try {
+      const r = await fetch('/api/optimize', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({message_id: msgId, use_ai: useAi})
+      });
+      const data = await r.json();
+      const suggestions = data.suggestions || [];
+
+      if (!suggestions.length) {
+        result.innerHTML = '<div style="margin-top:8px;color:var(--green);font-size:13px">✓ This prompt looks well-optimized!</div>';
+      } else {
+        result.innerHTML = suggestions.map(s => `
+          <div class="suggestion" style="margin-top:8px">
+            <div class="suggestion-type">${s.type}</div>
+            <div>${escHtml(s.suggestion)}</div>
+            ${s.estimated_savings ? `<div class="suggestion-savings">Estimated savings: ~${fmt(s.estimated_savings)} tokens</div>` : ''}
+          </div>
+        `).join('');
+      }
+    } catch(e) {
+      result.innerHTML = `<div style="margin-top:8px;color:var(--red);font-size:13px">Error: ${e.message}</div>`;
+    } finally {
+      if (btn) btn.disabled = false;
+      if (aiBtn) aiBtn.disabled = false;
+    }
+  }
+
+  loadTopPrompts();
+</script>
+{% endblock %}

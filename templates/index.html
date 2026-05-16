@@ -1,0 +1,273 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Claude Monitor{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Usage Dashboard</h1>
+  <p>Real-time overview of your Claude API usage across all sessions and projects.</p>
+</div>
+
+<!-- ── Weekly Summary ─────────────────────────────────────────── -->
+<div style="margin-bottom:20px">
+  <div style="font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:12px">
+    This Week vs Last Week
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px" id="weekly-cards">
+    <div class="card"><div class="card-label">Messages</div><div class="card-value" id="w-msgs">—</div><div class="card-sub" id="w-msgs-diff"></div></div>
+    <div class="card"><div class="card-label">Tokens Used</div><div class="card-value" id="w-tokens">—</div><div class="card-sub" id="w-tokens-diff"></div></div>
+    <div class="card"><div class="card-label">Cost</div><div class="card-value" id="w-cost">—</div><div class="card-sub" id="w-cost-diff"></div></div>
+    <div class="card"><div class="card-label">Cache Efficiency</div><div class="card-value" id="w-cache" style="color:var(--green)">—</div><div class="card-sub">context served from cache</div></div>
+    <div class="card"><div class="card-label">Avg Session Length</div><div class="card-value" id="w-dur">—</div><div class="card-sub" id="w-dur-sub">mins per session</div></div>
+    <div class="card"><div class="card-label">Avg Tokens/Turn</div><div class="card-value" id="w-tpt">—</div><div class="card-sub">input + output per message</div></div>
+  </div>
+</div>
+
+<!-- ── All-time stats ──────────────────────────────────────────── -->
+<div style="font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:12px">All Time</div>
+<div class="cards" id="stat-cards">
+  <div class="card"><div class="card-label">Total Sessions</div><div class="card-value" id="s-sessions">—</div></div>
+  <div class="card"><div class="card-label">Total Messages</div><div class="card-value" id="s-messages">—</div></div>
+  <div class="card"><div class="card-label">Input Tokens</div><div class="card-value" id="s-input">—</div></div>
+  <div class="card"><div class="card-label">Output Tokens</div><div class="card-value" id="s-output">—</div></div>
+  <div class="card"><div class="card-label">Cache Read</div><div class="card-value" id="s-cache-read" style="color:var(--green)">—</div></div>
+  <div class="card"><div class="card-label">Est. Total Cost</div><div class="card-value" id="s-cost" style="color:var(--yellow)">—</div></div>
+</div>
+
+<!-- ── Charts row 1 ───────────────────────────────────────────── -->
+<div class="grid-2">
+  <div class="panel">
+    <div class="panel-title">Daily Cost Trend — last 30 days</div>
+    <canvas id="costTrendChart" height="180"></canvas>
+  </div>
+  <div class="panel">
+    <div class="panel-title">Usage by Model</div>
+    <canvas id="modelChart" height="180"></canvas>
+  </div>
+</div>
+
+<!-- ── Charts row 2 ───────────────────────────────────────────── -->
+<div class="grid-2">
+  <div class="panel">
+    <div class="panel-title">Hourly Activity Heatmap</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Average token usage by hour of day (your local time)</div>
+    <canvas id="hourlyChart" height="160"></canvas>
+  </div>
+  <div class="panel">
+    <div class="panel-title">Daily Cache Efficiency %</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:10px">% of context tokens served from cache (higher = cheaper)</div>
+    <canvas id="cacheChart" height="160"></canvas>
+  </div>
+</div>
+
+<!-- ── Project breakdown ──────────────────────────────────────── -->
+<div class="panel">
+  <div class="panel-title">Top Projects by Token Usage</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Project</th>
+          <th>Sessions</th>
+          <th>Total Tokens</th>
+          <th>Est. Cost</th>
+          <th>Distribution</th>
+        </tr>
+      </thead>
+      <tbody id="project-table"></tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let costTrendChart, modelChart, hourlyChart, cacheChart;
+
+function pctDiff(curr, prev) {
+  if (!prev || prev === 0) return null;
+  return Math.round(((curr - prev) / prev) * 100);
+}
+
+function diffBadge(pct, invertColor = false) {
+  if (pct === null) return '<span style="color:var(--muted)">no prior data</span>';
+  const up = pct > 0;
+  // for cost: up is bad (red). For messages/tokens: up = good (green) or neutral
+  const color = invertColor
+    ? (up ? 'var(--red)' : 'var(--green)')
+    : (up ? 'var(--green)' : 'var(--red)');
+  const arrow = up ? '▲' : '▼';
+  return `<span style="color:${color}">${arrow} ${Math.abs(pct)}% vs last week</span>`;
+}
+
+async function loadDashboard() {
+  const [statsRes, insightsRes] = await Promise.all([
+    fetch('/api/stats'),
+    fetch('/api/insights'),
+  ]);
+  const stats_data = await statsRes.json();
+  const insights   = await insightsRes.json();
+  const s = stats_data.stats;
+  const w = insights.weekly;
+  const dur = insights.duration;
+
+  // ── All-time stats ─────────────────────────────────────
+  document.getElementById('s-sessions').textContent = fmt(s.total_sessions);
+  document.getElementById('s-messages').textContent = fmt(s.total_messages);
+  document.getElementById('s-input').textContent    = fmt(s.total_input);
+  document.getElementById('s-output').textContent   = fmt(s.total_output);
+  document.getElementById('s-cache-read').textContent = fmt(s.total_cache_read);
+  document.getElementById('s-cost').textContent     = fmtCost(s.total_cost);
+
+  // ── Weekly cards ───────────────────────────────────────
+  document.getElementById('w-msgs').textContent   = fmt(w.this_week_msgs);
+  document.getElementById('w-tokens').textContent = fmt(w.this_week_tokens);
+  document.getElementById('w-cost').textContent   = fmtCost(w.this_week_cost);
+  document.getElementById('w-msgs-diff').innerHTML   = diffBadge(pctDiff(w.this_week_msgs,   w.last_week_msgs));
+  document.getElementById('w-tokens-diff').innerHTML = diffBadge(pctDiff(w.this_week_tokens, w.last_week_tokens));
+  document.getElementById('w-cost-diff').innerHTML   = diffBadge(pctDiff(w.this_week_cost,   w.last_week_cost), true);
+
+  const cache = insights.overall_cache;
+  document.getElementById('w-cache').textContent = (cache.hit_pct || 0) + '%';
+
+  if (dur) {
+    document.getElementById('w-dur').textContent = dur.avg_duration_mins != null ? dur.avg_duration_mins + ' min' : '—';
+    document.getElementById('w-tpt').textContent = fmt(dur.avg_tokens_per_turn);
+  }
+
+  // ── Cost trend line chart ─────────────────────────────
+  const trend = insights.cost_trend;
+  if (costTrendChart) costTrendChart.destroy();
+  costTrendChart = new Chart(document.getElementById('costTrendChart'), {
+    type: 'line',
+    data: {
+      labels: trend.map(d => d.day),
+      datasets: [{
+        label: 'Cost (USD)',
+        data: trend.map(d => +(d.cost || 0).toFixed(4)),
+        borderColor: '#fbbf24',
+        backgroundColor: 'rgba(251,191,36,0.1)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 3,
+        pointBackgroundColor: '#fbbf24',
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { labels: { color: '#8892a4' } } },
+      scales: {
+        x: { ticks: { color: '#8892a4', maxTicksLimit: 8 }, grid: { color: '#2e3150' } },
+        y: { ticks: { color: '#8892a4', callback: v => '$' + v.toFixed(3) }, grid: { color: '#2e3150' } }
+      }
+    }
+  });
+
+  // ── Model doughnut ────────────────────────────────────
+  if (modelChart) modelChart.destroy();
+  const models = stats_data.by_model.filter(m => m.total_tokens > 0);
+  const colors = ['#7c6af7','#4fc3f7','#4ade80','#fbbf24','#f87171','#fb923c'];
+  modelChart = new Chart(document.getElementById('modelChart'), {
+    type: 'doughnut',
+    data: {
+      labels: models.map(m => m.model || 'unknown'),
+      datasets: [{ data: models.map(m => m.total_tokens), backgroundColor: colors, borderWidth: 0 }]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { labels: { color: '#8892a4', font: { size: 11 } } } }
+    }
+  });
+
+  // ── Hourly heatmap bar chart ───────────────────────────
+  const hourly = insights.hourly;
+  const maxH = Math.max(...hourly.map(h => h.tokens || 0), 1);
+  const hColors = hourly.map(h => {
+    const intensity = (h.tokens || 0) / maxH;
+    if (intensity > 0.7) return '#7c6af7';
+    if (intensity > 0.4) return '#4fc3f7';
+    if (intensity > 0.1) return '#2e3150';
+    return '#1a1d2e';
+  });
+  if (hourlyChart) hourlyChart.destroy();
+  hourlyChart = new Chart(document.getElementById('hourlyChart'), {
+    type: 'bar',
+    data: {
+      labels: hourly.map(h => h.hour + ':00'),
+      datasets: [{
+        label: 'Tokens',
+        data: hourly.map(h => h.tokens || 0),
+        backgroundColor: hColors,
+        borderRadius: 3,
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false },
+        tooltip: { callbacks: { label: ctx => `${fmt(ctx.raw)} tokens · ${hourly[ctx.dataIndex].messages} msgs` } }
+      },
+      scales: {
+        x: { ticks: { color: '#8892a4', maxRotation: 45, font: { size: 10 } }, grid: { color: '#2e3150' } },
+        y: { ticks: { color: '#8892a4', callback: v => fmt(v) }, grid: { color: '#2e3150' } }
+      }
+    }
+  });
+
+  // ── Cache efficiency line chart ───────────────────────
+  const cacheTrend = insights.cache_trend;
+  if (cacheChart) cacheChart.destroy();
+  cacheChart = new Chart(document.getElementById('cacheChart'), {
+    type: 'line',
+    data: {
+      labels: cacheTrend.map(d => d.day),
+      datasets: [{
+        label: 'Cache Hit %',
+        data: cacheTrend.map(d => d.cache_hit_pct || 0),
+        borderColor: '#4ade80',
+        backgroundColor: 'rgba(74,222,128,0.1)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 3,
+        pointBackgroundColor: '#4ade80',
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { labels: { color: '#8892a4' } } },
+      scales: {
+        x: { ticks: { color: '#8892a4', maxTicksLimit: 8 }, grid: { color: '#2e3150' } },
+        y: {
+          min: 0, max: 100,
+          ticks: { color: '#8892a4', callback: v => v + '%' },
+          grid: { color: '#2e3150' }
+        }
+      }
+    }
+  });
+
+  // ── Project table ─────────────────────────────────────
+  const projects = stats_data.by_project || [];
+  const maxTokens = Math.max(...projects.map(p => p.total_tokens || 0), 1);
+  document.getElementById('project-table').innerHTML = projects.map(p => `
+    <tr>
+      <td><a href="/sessions?project=${encodeURIComponent(p.project)}">${p.project || '—'}</a></td>
+      <td>${p.sessions}</td>
+      <td>${fmt(p.total_tokens)}</td>
+      <td>${fmtCost(p.cost)}</td>
+      <td>
+        <div class="token-bar-wrap">
+          <div class="token-bar">
+            <div class="token-bar-fill" style="width:${Math.round((p.total_tokens/maxTokens)*100)}%"></div>
+          </div>
+          <span style="color:var(--muted);font-size:11px;width:36px;text-align:right">
+            ${Math.round((p.total_tokens/maxTokens)*100)}%
+          </span>
+        </div>
+      </td>
+    </tr>
+  `).join('');
+}
+
+loadDashboard();
+setInterval(loadDashboard, 30000);
+</script>
+{% endblock %}

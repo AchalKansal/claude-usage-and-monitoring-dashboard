@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Sessions — Claude Monitor{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>All Sessions</h1>
+  <p>Every Claude Code conversation, with token usage and cost breakdown.</p>
+</div>
+
+<div class="panel">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Session</th>
+          <th>Project</th>
+          <th>Model</th>
+          <th>Messages</th>
+          <th>Input</th>
+          <th>Output</th>
+          <th>Cache Read</th>
+          <th>Est. Cost</th>
+          <th>Last Active</th>
+        </tr>
+      </thead>
+      <tbody id="sessions-table">
+        <tr><td colspan="9" style="text-align:center;padding:40px;color:var(--muted)">
+          <div class="spinner"></div> Loading…
+        </td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px">
+    <button class="btn btn-ghost" id="prev-btn" onclick="prevPage()" disabled>← Prev</button>
+    <span style="color:var(--muted);font-size:13px" id="page-label">Page 1</span>
+    <button class="btn btn-ghost" id="next-btn" onclick="nextPage()">Next →</button>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let page = 0;
+  const limit = 25;
+  const urlParams = new URLSearchParams(window.location.search);
+  const project = urlParams.get('project');
+
+  async function loadSessions() {
+    const offset = page * limit;
+    let url = `/api/sessions?limit=${limit}&offset=${offset}`;
+    if (project) url += `&project=${encodeURIComponent(project)}`;
+    const r = await fetch(url);
+    const rows = await r.json();
+
+    const tbody = document.getElementById('sessions-table');
+    if (!rows.length) {
+      tbody.innerHTML = `<tr><td colspan="9"><div class="empty-state"><h3>No sessions found</h3><p>Start using Claude Code and click Rescan.</p></div></td></tr>`;
+      document.getElementById('next-btn').disabled = true;
+      return;
+    }
+
+    tbody.innerHTML = rows.map(s => `
+      <tr>
+        <td><a href="/sessions/${s.session_id}">${s.session_id.slice(0,8)}…</a></td>
+        <td style="color:var(--muted)">${s.project || '—'}</td>
+        <td>${modelBadge(s.model)}</td>
+        <td>${s.message_count}</td>
+        <td>${fmt(s.total_input_tokens)}</td>
+        <td>${fmt(s.total_output_tokens)}</td>
+        <td style="color:var(--green)">${fmt(s.total_cache_read_tokens)}</td>
+        <td style="color:var(--yellow)">${fmtCost(s.cost)}</td>
+        <td style="color:var(--muted)">${timeAgo(s.last_seen)}</td>
+      </tr>
+    `).join('');
+
+    document.getElementById('page-label').textContent = `Page ${page + 1}`;
+    document.getElementById('prev-btn').disabled = page === 0;
+    document.getElementById('next-btn').disabled = rows.length < limit;
+  }
+
+  function nextPage() { page++; loadSessions(); }
+  function prevPage() { if (page > 0) { page--; loadSessions(); } }
+
+  loadSessions();
+</script>
+{% endblock %}
